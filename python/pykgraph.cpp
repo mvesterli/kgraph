@@ -261,6 +261,7 @@ namespace {
 
         virtual void build (IndexParams params) = 0;
         virtual python::object search (PyArrayObject *, SearchParams) const = 0;
+        virtual python::object get_nn(unsigned id, bool withDistance) const = 0;
 
         void load (char const *path) {
             index->load(path);
@@ -277,6 +278,7 @@ namespace {
     template <typename DATA_TYPE, typename METRIC_TYPE>
     class Impl: public ImplBase {
         NDArrayOracle<DATA_TYPE, METRIC_TYPE> oracle; 
+        unsigned graph_L;
     public:
         Impl (PyArrayObject *data): oracle(data) {
             check_array(data, DATA_TYPE());
@@ -285,6 +287,7 @@ namespace {
         void build (IndexParams params) {
             index->build(oracle, params, NULL);
             hasIndex = true;
+            graph_L = params.L;
         }
 
         python::object search (PyArrayObject *query, SearchParams params) const {
@@ -349,6 +352,37 @@ namespace {
                 ::omp_set_num_threads(params.threads);
             }
 #endif
+        }
+
+        python::object get_nn(unsigned id, bool withDistance) const {
+            npy_intp dims[] = { 1, graph_L };
+            PyObject *result = PyArray_SimpleNew(2, dims, NPY_UINT32);
+            kgraph::MatrixProxy<unsigned, 1> rmatrix(
+                reinterpret_cast<PyArrayObject *>(result));
+            unsigned _M, _L;
+
+            if (withDistance) {
+                PyObject *distance =  PyArray_SimpleNew(2, dims, NPY_FLOAT);
+                kgraph::MatrixProxy<float, 1> distmatrix(
+                    reinterpret_cast<PyArrayObject *>(distance));
+                index->get_nn(
+                    id,
+                    const_cast<unsigned*>(rmatrix[0]),
+                    const_cast<float*>(distmatrix[0]),
+                    &_M,
+                    &_L);
+                PyObject* tup = PyTuple_New(2);
+                PyTuple_SetItem(tup, 0, result);
+                PyTuple_SetItem(tup, 1, distance);
+                return python::object(python::handle<>(tup));
+            } else {
+                index->get_nn(
+                    id,
+                    const_cast<unsigned*>(rmatrix[0]),
+                    &_M,
+                    &_L);
+                return python::object(python::handle<>(result));
+            }
         }
     };
 }
@@ -456,6 +490,10 @@ public:
         params.blas = blas;
         return impl->search(reinterpret_cast<PyArrayObject *>(query), params);
     }
+
+    python::object get_nn(unsigned id, bool withDistance) {
+		return impl->get_nn(id, withDistance);
+    }
 };
 
 #if PY_VERSION_HEX >= 0x03000000
@@ -498,6 +536,10 @@ BOOST_PYTHON_MODULE(pykgraph)
              python::arg("threads") = 0,
              python::arg("withDistance") = false,
              python::arg("blas") = false))
+        .def("get_nn", &KGraph::get_nn,
+             (python::arg("data"),
+              python::arg("id"),
+              python::arg("withDistance") = false))
         ;
     python::def("load_lshkit", ::load_lshkit);
     python::def("version", kgraph::KGraph::version);
